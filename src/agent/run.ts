@@ -11,7 +11,7 @@ import {filterCompatibleMessages} from "./system/filterMessages.ts";
 const MODEL_NAME = 'gpt-5-mini'
 
 Laminar.initialize(({
-    projectApiKey: process.env.LAMINAR_API_KEY || '',
+    projectApiKey: process.env.LMNR_PROJECT_API_KEY || '',
 }))
 
 // export const runAgent = async (userMessage: string, conversationHistory: ModelMessage[], callbacks: AgentCallbacks) => {
@@ -84,7 +84,7 @@ export const runAgent = async (userMessage: string, conversationHistory: ModelMe
 
         const finishReason = await result.finishReason
 
-        if (finishReason !== 'tool_calls' || toolCalls.length === 0) {
+        if (finishReason !== 'tool-calls' || toolCalls.length === 0) {
             const responseMessages = await result.response
             messages.push(...responseMessages.messages)
             break
@@ -94,15 +94,15 @@ export const runAgent = async (userMessage: string, conversationHistory: ModelMe
         messages.push(...responseMessages.messages)
 
         for (const tc of toolCalls) {
-            const result = await executeTool(tc.toolName, tc.args)
-            callbacks.onToolCallEnd(tc.toolName, result)
+            const toolResult = await executeTool(tc.toolName, tc.args)
+            callbacks.onToolCallEnd(tc.toolName, toolResult)
             messages.push({
                 role: 'tool',
                 content: [{
                     type: 'tool-result',
                     toolName: tc.toolName,
                     toolCallId: tc.toolCallId,
-                    output: {type: 'text', value: "result"}
+                    output: {type: 'text', value: toolResult}
                 }]
             })
         }
