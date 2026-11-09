@@ -1,11 +1,10 @@
 import 'dotenv/config.js'
-import {generateText, type ModelMessage, streamText} from 'ai'
+import {type ModelMessage, streamText} from 'ai'
 import {openai} from "@ai-sdk/openai";
 import {tools} from "./tools";
 import {getTracer, Laminar} from "@lmnr-ai/lmnr";
-import {executeTool} from "./executeTools.ts";
 import { SYSTEM_PROMPT } from "./system/prompt.ts";
-import type {AgentCallbacks, ToolCallInfo} from "../types.ts";
+import type {AgentCallbacks} from "../types.ts";
 import {filterCompatibleMessages} from "./system/filterMessages.ts";
 
 const MODEL_NAME = 'gpt-5-mini'
@@ -34,23 +33,23 @@ Laminar.initialize(({
 // runAgent('Test message')
 
 export const runAgent = async (userMessage: string, conversationHistory: ModelMessage[], callbacks: AgentCallbacks): Promise<ModelMessage[]> => {
-    const workingHistory = filterCompatibleMessages(conversationHistory)
+    // The system prompt is passed via `system` on every call, so it is never stored in the history.
     const messages: ModelMessage[] = [
-        {role: 'system', content: SYSTEM_PROMPT}, ...workingHistory, {role: 'user', content: userMessage}
+        ...filterCompatibleMessages(conversationHistory), {role: 'user', content: userMessage}
     ]
-
 
     let fullResponse = ""
 
     while (true) {
+        // The AI SDK executes tools that have an `execute` function itself, so we do not run them manually here.
         const result = streamText({
             model: openai(MODEL_NAME),
+            system: SYSTEM_PROMPT,
             messages,
             tools,
             experimental_telemetry: {isEnabled: true, tracer: getTracer()},
         })
 
-        const toolCalls: ToolCallInfo[] = []
         let currentText = ""
         let streamingError: Error | null = null
 
@@ -63,12 +62,15 @@ export const runAgent = async (userMessage: string, conversationHistory: ModelMe
 
                 if (chunk.type === 'tool-call') {
                     const input = 'input' in chunk ? chunk.input : {}
-                    toolCalls.push({toolCallId: chunk.toolCallId, toolName: chunk.toolName, args: input as any})
                     callbacks.onToolCallStart(chunk.toolName, input)
+                }
+
+                if (chunk.type === 'tool-result') {
+                    callbacks.onToolCallEnd(chunk.toolName, String(chunk.output))
                 }
             }
         } catch (e) {
-            streamingError = e as Error
+            streamingError = e instanceof Error ? e : new Error(String(e))
             if (!currentText && !streamingError.message.includes('No output generated')) {
                 throw streamingError
             }
@@ -83,28 +85,12 @@ export const runAgent = async (userMessage: string, conversationHistory: ModelMe
         }
 
         const finishReason = await result.finishReason
-
-        if (finishReason !== 'tool-calls' || toolCalls.length === 0) {
-            const responseMessages = await result.response
-            messages.push(...responseMessages.messages)
-            break
-        }
-
+        // Response messages already contain the assistant message and the executed tool results.
         const responseMessages = await result.response
         messages.push(...responseMessages.messages)
 
-        for (const tc of toolCalls) {
-            const toolResult = await executeTool(tc.toolName, tc.args)
-            callbacks.onToolCallEnd(tc.toolName, toolResult)
-            messages.push({
-                role: 'tool',
-                content: [{
-                    type: 'tool-result',
-                    toolName: tc.toolName,
-                    toolCallId: tc.toolCallId,
-                    output: {type: 'text', value: toolResult}
-                }]
-            })
+        if (finishReason !== 'tool-calls') {
+            break
         }
     }
 
@@ -113,4 +99,3 @@ export const runAgent = async (userMessage: string, conversationHistory: ModelMe
     return messages
 
 }
-

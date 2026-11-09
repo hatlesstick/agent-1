@@ -13,15 +13,18 @@ export const filterCompatibleMessages = (
       return true;
     }
 
-    // Keep assistant messages that have text content
+    // Keep assistant messages that have text content or tool calls.
+    // Dropping tool-call-only messages would leave their tool results orphaned,
+    // which the API rejects on the next turn.
     if (msg.role === "assistant") {
       const content = msg.content;
       if (typeof content === "string" && content.trim()) {
         return true;
       }
-      // Check for array content with text parts
+      // Check for array content with text or tool-call parts
       if (Array.isArray(content)) {
         const hasTextContent = content.some((part: unknown) => {
+          if (typeof part === "object" && part !== null && "type" in part && part.type === "tool-call") return true;
           if (typeof part === "string" && part.trim()) return true;
           if (typeof part === "object" && part !== null && "text" in part) {
             const textPart = part as { text?: string };
