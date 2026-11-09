@@ -5,7 +5,14 @@ import {tools} from "./tools";
 import {getTracer, Laminar} from "@lmnr-ai/lmnr";
 import { SYSTEM_PROMPT } from "./system/prompt.ts";
 import type {AgentCallbacks} from "../types.ts";
+
+import {
+    getModelLimits, isOverThreshold, calculateUsagePercentage, compactConversation, DEFAULT_THRESHOLD,
+    estimateMessagesTokens
+} from "./context";
+
 import {filterCompatibleMessages} from "./system/filterMessages.ts";
+
 
 const MODEL_NAME = 'gpt-5-mini'
 
@@ -33,10 +40,15 @@ Laminar.initialize(({
 // runAgent('Test message')
 
 export const runAgent = async (userMessage: string, conversationHistory: ModelMessage[], callbacks: AgentCallbacks): Promise<ModelMessage[]> => {
+    const modelLimits = getModelLimits(MODEL_NAME);
     // The system prompt is passed via `system` on every call, so it is never stored in the history.
-    const messages: ModelMessage[] = [
-        ...filterCompatibleMessages(conversationHistory), {role: 'user', content: userMessage}
-    ]
+    const history = filterCompatibleMessages(conversationHistory)
+    let messages: ModelMessage[] = [...history, {role: 'user', content: userMessage}]
+    const precheckTokens = estimateMessagesTokens(messages);
+    if (isOverThreshold(precheckTokens.total, modelLimits.contextWindow)) {
+        const compacted = await compactConversation(history, MODEL_NAME);
+        messages = [...compacted, {role: 'user', content: userMessage}]
+    }
 
     let fullResponse = ""
 
@@ -49,7 +61,19 @@ export const runAgent = async (userMessage: string, conversationHistory: ModelMe
             tools,
             experimental_telemetry: {isEnabled: true, tracer: getTracer()},
         })
-
+        const reportTokenUsage = async () => {
+            if (callbacks.onTokenUsage) {
+                const usage = estimateMessagesTokens(messages)
+                callbacks.onTokenUsage({
+                    inputTokens: usage.input,
+                    outputTokens: usage.output,
+                    totalTokens: usage.total,
+                    contextWindow: modelLimits.contextWindow,
+                    threshold: DEFAULT_THRESHOLD,
+                    percentage: calculateUsagePercentage(usage.total, modelLimits.contextWindow)
+                })
+            }
+        }
         let currentText = ""
         let streamingError: Error | null = null
 
@@ -81,6 +105,7 @@ export const runAgent = async (userMessage: string, conversationHistory: ModelMe
         if (streamingError && !currentText) {
             fullResponse = 'Sorry about that, I encountered an error while generating a response. Please try again later.'
             callbacks.onToken(fullResponse)
+
             break;
         }
 
@@ -88,7 +113,7 @@ export const runAgent = async (userMessage: string, conversationHistory: ModelMe
         // Response messages already contain the assistant message and the executed tool results.
         const responseMessages = await result.response
         messages.push(...responseMessages.messages)
-
+        reportTokenUsage()
         if (finishReason !== 'tool-calls') {
             break
         }
