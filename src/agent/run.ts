@@ -12,9 +12,16 @@ import {
 } from "./context";
 
 import {filterCompatibleMessages} from "./system/filterMessages.ts";
+import {executeTool} from "./executeTools.ts";
 
 
 const MODEL_NAME = 'gpt-5-mini'
+
+// Tools without `execute`: the SDK only returns tool calls, so we can ask for approval
+// before running them ourselves. Provider tools (webSearch) are still executed by OpenAI.
+const toolDefinitions = Object.fromEntries(
+    Object.entries(tools).map(([name, t]) => [name, {...t, execute: undefined}])
+) as typeof tools
 
 Laminar.initialize(({
     projectApiKey: process.env.LMNR_PROJECT_API_KEY || '',
@@ -53,12 +60,12 @@ export const runAgent = async (userMessage: string, conversationHistory: ModelMe
     let fullResponse = ""
 
     while (true) {
-        // The AI SDK executes tools that have an `execute` function itself, so we do not run them manually here.
+        // Tools are passed without `execute`, so the SDK does not run them — we do it below after approval.
         const result = streamText({
             model: openai(MODEL_NAME),
             system: SYSTEM_PROMPT,
             messages,
-            tools,
+            tools: toolDefinitions,
             experimental_telemetry: {isEnabled: true, tracer: getTracer()},
         })
         const reportTokenUsage = async () => {
@@ -89,6 +96,7 @@ export const runAgent = async (userMessage: string, conversationHistory: ModelMe
                     callbacks.onToolCallStart(chunk.toolName, input)
                 }
 
+                // Only provider-executed tools (webSearch) produce results inside the stream now.
                 if (chunk.type === 'tool-result') {
                     callbacks.onToolCallEnd(chunk.toolName, String(chunk.output))
                 }
@@ -110,11 +118,48 @@ export const runAgent = async (userMessage: string, conversationHistory: ModelMe
         }
 
         const finishReason = await result.finishReason
-        // Response messages already contain the assistant message and the executed tool results.
+        // Response messages contain the assistant message with tool calls (and provider tool results).
         const responseMessages = await result.response
         messages.push(...responseMessages.messages)
         reportTokenUsage()
         if (finishReason !== 'tool-calls') {
+            break
+        }
+
+        // Local tool calls that we have to approve and execute ourselves
+        const toolCalls = (await result.toolCalls).filter((tc) => !tc.providerExecuted)
+
+        // Process tool calls sequentially with approval for each
+        let rejected = false
+        for (const tc of toolCalls) {
+            const approved = rejected ? false : await callbacks.onToolApproval(tc.toolName, tc.input)
+
+            if (!approved) {
+                rejected = true
+            }
+
+            // Every tool call needs a matching tool result, otherwise the API rejects the next request
+            const output = approved
+                ? await executeTool(tc.toolName, tc.input)
+                : 'The user rejected this tool call.'
+
+            callbacks.onToolCallEnd(tc.toolName, output)
+
+            messages.push({
+                role: 'tool',
+                content: [
+                    {
+                        type: 'tool-result',
+                        toolCallId: tc.toolCallId,
+                        toolName: tc.toolName,
+                        output: {type: 'text', value: output},
+                    },
+                ],
+            })
+            reportTokenUsage()
+        }
+
+        if (rejected) {
             break
         }
     }
